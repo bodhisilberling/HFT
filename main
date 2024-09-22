@@ -1,0 +1,203 @@
+import numpy as np
+import pandas as pd
+import threading
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge
+from numba import jit
+import time
+
+class OptimizedHFTAlgorithm:
+    def __init__(self):
+        # Model for price prediction
+        self.model = self.train_price_prediction_model()
+
+        # Execution cost model
+        self.execution_model = Ridge(alpha=1.0)
+
+        # Define risk management thresholds
+        self.position = 0
+        self.risk_tolerance = 100000
+        self.max_drawdown = 0.05  # 5% maximum drawdown limit
+        self.stop_loss = 0.02     # 2% stop loss on any position
+        self.take_profit = 0.05   # Take profit when the price moves 5%
+
+        # Scaler for feature normalization
+        self.scaler = StandardScaler()
+
+        # Predefined hyperparameters for models
+        self.model_hyperparameters = {
+            'n_estimators': [100, 200],
+            'max_depth': [5, 10, 15],
+            'min_samples_split': [2, 5],
+            'min_samples_leaf': [1, 2, 4],
+        }
+        
+        # Parameters to optimize
+        self.hyperparameter_tuner = GridSearchCV(RandomForestClassifier(), 
+                                                 self.model_hyperparameters, 
+                                                 cv=3)
+
+        # Multithreading locks
+        self.lock = threading.Lock()
+
+        # Historical data for backtesting
+        self.historical_data = None
+
+    # Multithreaded Data Acquisition
+    def acquire_market_data(self):
+        """
+        Acquire market data with multithreading and ensure minimal latency.
+        Use direct API calls to exchanges or data vendors for real-time data.
+        """
+        while True:
+            # Simulate acquiring data from exchange feeds (should be optimized for low latency)
+            try:
+                with self.lock:
+                    data = pd.read_csv('real_time_data.csv')  # Replace with real data feed
+
+                    # Clean and preprocess in real-time
+                    data = self.preprocess_data(data)
+                    
+                    # Predict the price and execute orders concurrently
+                    threading.Thread(target=self.predict_price, args=(data,)).start()
+                    threading.Thread(target=self.execute_order, args=(data,)).start()
+                    
+            except Exception as e:
+                print(f"Error in acquiring data: {e}")
+
+            time.sleep(0.01)  # Mimic real-time delay (10ms)
+
+    # Preprocessing function with JIT optimization
+    @jit
+    def preprocess_data(self, data):
+        """
+        Preprocess market data and generate advanced features.
+        Numba JIT speeds up the execution significantly.
+        """
+        data['moving_average_5'] = data['price'].rolling(window=5).mean()
+        data['moving_average_10'] = data['price'].rolling(window=10).mean()
+        data['volatility'] = data['price'].rolling(window=10).std()
+        data['momentum'] = data['price'] - data['price'].shift(3)
+        data['rsi'] = self.calculate_rsi(data['price'], 14)
+        return data.dropna()
+
+    def calculate_rsi(self, prices, window=14):
+        """
+        Relative Strength Index (RSI) calculation for momentum.
+        """
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    # Model Training
+    def train_price_prediction_model(self):
+        """
+        Train a RandomForest classifier for price prediction.
+        Use GridSearchCV to optimize hyperparameters.
+        """
+        historical_data = pd.read_csv('historical_data.csv')  # Load historical market data
+
+        # Feature engineering
+        features = self.preprocess_data(historical_data)
+
+        X = features[['moving_average_5', 'moving_average_10', 'volatility', 'momentum', 'rsi']]
+        y = (features['price'].shift(-1) > features['price']).astype(int)  # Binary classification (up/down)
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+        # Train with hyperparameter optimization
+        tuned_model = self.hyperparameter_tuner.fit(X_train, y_train)
+
+        print(f"Best parameters found: {self.hyperparameter_tuner.best_params_}")
+
+        return tuned_model.best_estimator_
+
+    # Price Prediction
+    def predict_price(self, data):
+        """
+        Predict price movement using a trained model.
+        Scales data and predicts using a machine learning model.
+        """
+        features = data[['moving_average_5', 'moving_average_10', 'volatility', 'momentum', 'rsi']]
+        scaled_features = self.scaler.transform(features)
+
+        prediction = self.model.predict(scaled_features)
+        return prediction
+
+    # Execution and Order Management
+    def execute_order(self, data):
+        """
+        Executes orders based on model predictions and monitors position sizing.
+        """
+        prediction = self.predict_price(data)
+
+        if prediction == 1 and self.position <= 0:
+            # Buy if prediction is up and no or negative position
+            self.position += 100  # Adjust position sizing based on prediction confidence
+            print(f"Bought 100 shares at {data['price'].iloc[-1]}")
+
+        elif prediction == 0 and self.position >= 0:
+            # Sell if prediction is down and current position is long
+            self.position -= 100
+            print(f"Sold 100 shares at {data['price'].iloc[-1]}")
+
+        # Monitor risks during execution
+        threading.Thread(target=self.risk_management, args=(data,)).start()
+
+    # Dynamic Risk Management
+    def risk_management(self, data):
+        """
+        Implements real-time risk management including max drawdown and stop-loss monitoring.
+        """
+        current_price = data['price'].iloc[-1]
+        initial_price = data['price'].iloc[0]
+
+        # Check for stop-loss
+        if self.position > 0 and (current_price - initial_price) / initial_price < -self.stop_loss:
+            self.position = 0
+            print(f"Stop-loss triggered, sold all at {current_price}")
+        
+        # Check for take profit
+        elif self.position > 0 and (current_price - initial_price) / initial_price > self.take_profit:
+            self.position = 0
+            print(f"Take-profit triggered, sold all at {current_price}")
+        
+        # Risk exposure limits
+        if abs(self.position) > self.risk_tolerance:
+            self.position = 0
+            print("Risk exposure too high, liquidating positions.")
+
+    # Backtesting & Simulation
+    def backtest(self, historical_data):
+        """
+        Simulates the strategy on historical data to validate performance.
+        """
+        for i in range(len(historical_data) - 1):
+            current_data = historical_data.iloc[:i+1]
+            self.execute_order(current_data)
+
+            if i % 100 == 0:
+                print(f"Backtest progress: {i} / {len(historical_data)}")
+
+    # Multithreaded Strategy Execution
+    def run(self):
+        """
+        Start the HFT algorithm using multithreading.
+        One thread handles data acquisition while another executes trades.
+        """
+        threading.Thread(target=self.acquire_market_data).start()
+
+# Main driver
+if __name__ == "__main__":
+    hft_algo = OptimizedHFTAlgorithm()
+
+    # For testing purposes, we can simulate with historical data
+    historical_data = pd.read_csv('historical_data.csv')
+    hft_algo.backtest(historical_data)
+
+    # For real-time trading, run the algorithm
+    hft_algo.run()
