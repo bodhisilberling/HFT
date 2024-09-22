@@ -1,0 +1,237 @@
+import numpy as np
+import pandas as pd
+import threading
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge
+from numba import jit
+import time
+
+class ETFHFTAlgorithm:
+    def __init__(self):
+        # Price prediction model for ETF trading
+        self.model = self.train_price_prediction_model()
+
+        # Execution cost model for minimizing transaction costs
+        self.execution_model = Ridge(alpha=1.0)
+
+        # Risk management parameters
+        self.position = 0
+        self.risk_tolerance = 100000
+        self.max_drawdown = 0.05
+        self.stop_loss = 0.02
+        self.take_profit = 0.05
+
+        # Arbitrage parameters for ETF vs. underlying asset pricing
+        self.arbitrage_threshold = 0.01  # 1% arbitrage opportunity triggers a trade
+
+        # Feature scaler for normalizing data
+        self.scaler = StandardScaler()
+
+        # Hyperparameters for model tuning
+        self.model_hyperparameters = {
+            'n_estimators': [100, 200],
+            'max_depth': [5, 10, 15],
+            'min_samples_split': [2, 5],
+            'min_samples_leaf': [1, 2, 4],
+        }
+
+        # Hyperparameter tuning using GridSearchCV
+        self.hyperparameter_tuner = GridSearchCV(RandomForestClassifier(), 
+                                                 self.model_hyperparameters, 
+                                                 cv=3)
+
+        # Lock for multithreaded operations
+        self.lock = threading.Lock()
+
+    # Multithreaded Data Acquisition for ETFs and underlying securities
+    def acquire_market_data(self):
+        """
+        Acquire ETF and underlying securities data concurrently.
+        Use direct APIs to minimize latency.
+        """
+        while True:
+            try:
+                with self.lock:
+                    # Load ETF data and underlying index data
+                    etf_data = pd.read_csv('etf_real_time_data.csv')  # Simulate ETF data feed
+                    underlying_data = pd.read_csv('underlying_real_time_data.csv')  # Simulate underlying index feed
+
+                    # Preprocess both ETF and underlying index data
+                    etf_data = self.preprocess_data(etf_data)
+                    underlying_data = self.preprocess_data(underlying_data)
+
+                    # Predict price movement and execute arbitrage or directional trades concurrently
+                    threading.Thread(target=self.predict_price, args=(etf_data, underlying_data)).start()
+                    threading.Thread(target=self.execute_order, args=(etf_data, underlying_data)).start()
+
+            except Exception as e:
+                print(f"Error in acquiring data: {e}")
+
+            time.sleep(0.01)  # Simulate real-time latency (10ms)
+
+    # Preprocessing function with JIT optimization
+    @jit
+    def preprocess_data(self, data):
+        """
+        Preprocess market data for ETFs and underlying assets.
+        Calculate advanced technical indicators for arbitrage and directional trading.
+        """
+        data['moving_average_5'] = data['price'].rolling(window=5).mean()
+        data['moving_average_10'] = data['price'].rolling(window=10).mean()
+        data['volatility'] = data['price'].rolling(window=10).std()
+        data['momentum'] = data['price'] - data['price'].shift(3)
+        data['rsi'] = self.calculate_rsi(data['price'], 14)
+        return data.dropna()
+
+    def calculate_rsi(self, prices, window=14):
+        """
+        Relative Strength Index (RSI) calculation.
+        """
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    # Model Training for Price Prediction
+    def train_price_prediction_model(self):
+        """
+        Train a RandomForest classifier for predicting ETF price movements.
+        Use historical data for training.
+        """
+        historical_data = pd.read_csv('etf_historical_data.csv')  # Simulate historical ETF data
+        underlying_data = pd.read_csv('underlying_historical_data.csv')  # Simulate historical data for underlying index
+
+        # Preprocess and generate features for ETF and underlying index
+        etf_features = self.preprocess_data(historical_data)
+        underlying_features = self.preprocess_data(underlying_data)
+
+        # Combine ETF and underlying data for joint feature engineering
+        combined_features = pd.merge(etf_features, underlying_features, on='timestamp', suffixes=('_etf', '_underlying'))
+
+        X = combined_features[['moving_average_5_etf', 'moving_average_10_etf', 'volatility_etf', 
+                               'momentum_etf', 'rsi_etf', 'moving_average_5_underlying', 
+                               'moving_average_10_underlying', 'volatility_underlying']]
+
+        y = (combined_features['price_etf'].shift(-1) > combined_features['price_etf']).astype(int)  # Binary classification (up/down)
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+        # Train with hyperparameter optimization
+        tuned_model = self.hyperparameter_tuner.fit(X_train, y_train)
+
+        print(f"Best parameters found: {self.hyperparameter_tuner.best_params_}")
+
+        return tuned_model.best_estimator_
+
+    # Price Prediction for ETFs
+    def predict_price(self, etf_data, underlying_data):
+        """
+        Predict price movement for ETFs and underlying securities.
+        Combine features from both ETF and underlying securities to detect arbitrage opportunities.
+        """
+        combined_data = pd.merge(etf_data, underlying_data, on='timestamp', suffixes=('_etf', '_underlying'))
+
+        features = combined_data[['moving_average_5_etf', 'moving_average_10_etf', 'volatility_etf', 
+                                  'momentum_etf', 'rsi_etf', 'moving_average_5_underlying', 
+                                  'moving_average_10_underlying', 'volatility_underlying']]
+
+        scaled_features = self.scaler.transform(features)
+
+        prediction = self.model.predict(scaled_features)
+        return prediction
+
+    # Execution and Arbitrage Strategy
+    def execute_order(self, etf_data, underlying_data):
+        """
+        Executes orders based on ETF and underlying index price discrepancies.
+        Uses arbitrage strategy if the ETF deviates from its underlying index price.
+        """
+        prediction = self.predict_price(etf_data, underlying_data)
+
+        # Calculate the arbitrage spread between ETF and its underlying index
+        arbitrage_spread = etf_data['price'].iloc[-1] - underlying_data['price'].iloc[-1]
+
+        if abs(arbitrage_spread) > self.arbitrage_threshold:
+            if arbitrage_spread > 0:
+                # If ETF is overpriced, sell ETF and buy underlying index
+                self.position -= 100  # Short ETF
+                print(f"Selling ETF at {etf_data['price'].iloc[-1]} and buying underlying at {underlying_data['price'].iloc[-1]}")
+
+            else:
+                # If ETF is underpriced, buy ETF and sell underlying index
+                self.position += 100  # Long ETF
+                print(f"Buying ETF at {etf_data['price'].iloc[-1]} and selling underlying at {underlying_data['price'].iloc[-1]}")
+
+        # Alternatively, execute based on directional price predictions
+        elif prediction == 1 and self.position <= 0:
+            # Buy if prediction is up and no or negative position
+            self.position += 100
+            print(f"Bought 100 shares of ETF at {etf_data['price'].iloc[-1]}")
+
+        elif prediction == 0 and self.position >= 0:
+            # Sell if prediction is down and currently long
+            self.position -= 100
+            print(f"Sold 100 shares of ETF at {etf_data['price'].iloc[-1]}")
+
+        # Monitor risk during execution
+        threading.Thread(target=self.risk_management, args=(etf_data,)).start()
+
+    # Advanced Risk Management
+    def risk_management(self, etf_data):
+        """
+        Implements real-time risk management, including stop-loss and take-profit limits.
+        """
+        current_price = etf_data['price'].iloc[-1]
+        initial_price = etf_data['price'].iloc[0]
+
+        # Stop-loss strategy
+        if self.position > 0 and (current_price - initial_price) / initial_price < -self.stop_loss:
+            self.position = 0
+            print(f"Stop-loss triggered, sold all ETF at {current_price}")
+
+        # Take-profit strategy
+        elif self.position > 0 and (current_price - initial_price) / initial_price > self.take_profit:
+            self.position = 0
+            print(f"Take-profit triggered, sold all ETF at {current_price}")
+
+        # Risk exposure limit
+        if abs(self.position) > self.risk_tolerance:
+            self.position = 0
+            print("Risk exposure too high, liquidating positions.")
+
+    # Backtesting & Simulation for ETF Strategies
+    def backtest(self, etf_historical_data, underlying_historical_data):
+        """
+        Simulates the ETF trading strategy using historical data.
+        """
+        for i in range(len(etf_historical_data) - 1):
+            current_etf_data = etf_historical_data.iloc[:i+1]
+            current_underlying_data = underlying_historical_data.iloc[:i+1]
+
+            self.execute_order(current_etf_data, current_underlying_data)
+
+            if i % 100 == 0:
+                print(f"Backtest progress: {i} / {len(etf_historical_data)}")
+
+    # Multithreaded Strategy Execution for ETF Trading
+    def run(self):
+        """
+        Starts the HFT algorithm using multithreading for ETF trading.
+        One thread handles data acquisition while another executes trades.
+        """
+        threading.Thread(target=self.acquire_market_data).start()
+
+# Main driver
+if __name__ == "__main__":
+    etf_hft_algo = ETFHFTAlgorithm()
+
+    # Simulate backtesting with historical data
+    etf_historical_data = pd.read_csv('etf_historical_data.csv')
+    underlying_historical_data = pd.read_csv('underlying_historical_data.csv')
+    etf_hft_algo.backtest(etf_historical_data, underlying_historical_data)
+
+    # For real-time trading, run the algorithm
+    etf_hft_algo.run()
